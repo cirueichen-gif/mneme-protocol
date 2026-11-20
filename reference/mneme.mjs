@@ -58,14 +58,27 @@ function requireRoot(args) {
 }
 
 // 角色沒有預設值：沒帶就拒絕（退出碼 2），不會退回 owner。
+// 角色可選擇性地在 mneme.json 用 aliases 宣告別名（例如舊名、暱稱），這裡會解析成正式名稱。
+function resolveRoleName(config, value) {
+  const roles = config.roles ?? {}
+  if (Object.hasOwn(roles, value)) return value
+  for (const [name, role] of Object.entries(roles)) {
+    const aliases = Array.isArray(role?.aliases) ? role.aliases : []
+    if (aliases.includes(value)) return name
+  }
+  return null
+}
+
 function requireRole(config, args) {
+  const canonical = Object.keys(config.roles ?? {}).join('、')
   if (typeof args.as !== 'string') {
-    throw new UsageError(`這個指令必須指定 --as <角色>（可用：${Object.keys(config.roles ?? {}).join('、')}）`)
+    throw new UsageError(`這個指令必須指定 --as <角色>（可用：${canonical}）`)
   }
-  if (!Object.hasOwn(config.roles ?? {}, args.as)) {
-    throw new UsageError(`未知角色：${args.as}（可用：${Object.keys(config.roles ?? {}).join('、')}）`)
+  const resolved = resolveRoleName(config, args.as)
+  if (!resolved) {
+    throw new UsageError(`未知角色：${args.as}（可用：${canonical}）`)
   }
-  return args.as
+  return resolved
 }
 
 // 走訪檔案；目錄與檔案都要通過真實路徑檢查，擋掉符號連結／junction 逃逸。

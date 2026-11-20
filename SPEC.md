@@ -45,7 +45,8 @@
   "roles": {
     "<角色名稱>": {
       "read":  ["persona", "private:alpha", "shared"],   // 必要：可見性白名單
-      "write": ["diary"]                                 // 選用：可寫分區
+      "write": ["diary"],                                // 選用：可寫分區
+      "aliases": ["舊名", "暱稱"]                         // 選用：只影響 CLI 解析，不影響權限
     }
   },
   "writeback": {

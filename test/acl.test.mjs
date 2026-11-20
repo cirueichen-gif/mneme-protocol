@@ -385,6 +385,23 @@ test('commit 只接受 _drafts/ 底下的草稿', () => {
   })
 })
 
+test('角色別名會被解析成正式名稱，未知的仍拒絕', () => {
+  withTempLibrary(library => {
+    const configPath = join(library, 'mneme.json')
+    const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
+    cfg.roles.alpha.aliases = ['小甲', '阿甲', '舊名字']
+    writeFileSync(configPath, JSON.stringify(cfg, null, 2), 'utf8')
+
+    const viaAlias = run(CLI, ['recall', '--root', library, '--as', '舊名字'])
+    assert.equal(viaAlias.status, 0, viaAlias.stderr)
+    assert.equal(json(viaAlias).role, 'alpha', '回應要用正式名稱')
+
+    const unknown = run(CLI, ['recall', '--root', library, '--as', '路人甲'])
+    assert.equal(unknown.status, 2)
+    assert.match(unknown.stderr, /未知角色/)
+  })
+})
+
 test('writeback.requireConfirm 設成 false 的設定要被拒絕載入', () => {
   withTempLibrary(library => {
     const configPath = join(library, 'mneme.json')

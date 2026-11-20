@@ -175,6 +175,10 @@ sourceSha256: <來源內容的 sha256>
 
 `<writeback.dir>` 必須是單層目錄且在 `<root>` 內；設定成 `../x` 必須被拒絕。
 
+**來源的責任邊界（重要）：** 程式只能保證「這句 quote 出現在你指名的檔案裡」，不能保證那個檔案是對話紀錄。
+所以 `source` **必須是屋主提供的對話紀錄，或記憶庫裡既有的檔案**；agent 自己寫一份筆記再引用它，
+等於自己發證明給自己。稽核會記下 `sourceInArchive`，屋主可以據此判斷來源可信度。
+
 ### 5.6 `commit`（寫入第二段）
 
 輸入：`--as`、`--ack-role`（必須與 `--as` 相同）、`--draft`、`--confirm`；可選 `--scope`、`--force`、`--no-verify`。
@@ -184,7 +188,11 @@ sourceSha256: <來源內容的 sha256>
 1. **身分雙錄**：`--as` 與 `--ack-role` 不同 → 拒收。
 2. **草稿來源**：草稿必須在 `<writeback.dir>` 內；front matter 的 `role` 必須等於本次 `--as`。
 3. **結構完整**：每一條都要有 `statement`、`quote`、`privacy`；`privacy` 僅限 `public` / `private` / `secret`。
-4. **quote 逐字核對**：拿 front matter 的 `source` 讀回來源檔，每一條的 `quote` 必須是來源的逐字子字串（比對前做 NFKC 正規化與空白收斂）。來源檔不存在或不可讀時，除非明確加 `--no-verify`，否則拒收；`--no-verify` 會記入稽核。
+4. **quote 逐字核對**：拿 front matter 的 `source` 讀回來源檔，每一條的 `quote` 必須是來源的逐字子字串（比對前做 NFKC 正規化與空白收斂）。
+   - `quote` 至少 6 個字——單一字詞不算出處。
+   - 來源檔的 sha256 必須等於 front matter 的 `sourceSha256`；**draft 之後才改來源，整批拒收**。
+   - 來源檔不存在或不可讀時，除非明確加 `--no-verify`，否則拒收。`--no-verify` 只允許屋主要求，會記入稽核並標 `verified: false`。
+   - 輸出與稽核必須記錄 `source`、`sourceSha`、`sourceInArchive`：屋主要能一眼看出「這條的來源是記憶庫裡既有的檔案，還是 agent 自己寫的筆記」。
 5. **落點合法**：`L0` 與 `visibility: persona` 的分區**不接受回寫**（人格層只能由人改）。角色有多個可寫分區時必須用 `--scope` 指定。
 6. **冪等**：同一份草稿（同 sha256）已提交過就跳過，除非 `--force`。
 

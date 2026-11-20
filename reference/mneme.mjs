@@ -99,7 +99,7 @@ function walk(root, dir, out = []) {
         continue
       }
       if (!isInsideReal(root, real)) continue
-      out.push(full)
+      out.push(real) // 存真實路徑，避免檢查與讀取之間的 TOCTOU
     }
   }
   return out
@@ -117,16 +117,18 @@ function firstHeading(text) {
   return ''
 }
 
-function relOf(root, file) {
-  return relative(realRoot(root), file).split('\\').join('/')
+function relOf(base, file) {
+  return relative(base, file).split('\\').join('/')
 }
 
 function cmdRecall(config, root, role) {
+  // 一律以真實路徑為基準：記憶庫本身可能是 junction／symlink（Windows 很常見）
+  const base = realRoot(root)
   const scopes = readableScopes(config, role)
   const files = []
   for (const scope of scopes) {
-    for (const file of walk(root, join(root, scope))) {
-      const rel = relOf(root, file)
+    for (const file of walk(base, join(base, scope))) {
+      const rel = relOf(base, file)
       const text = readFileSync(file, 'utf8')
       files.push({
         path: rel,
@@ -167,12 +169,16 @@ function cmdSearch(config, root, role, keywords, options) {
     }
   }
 
-  const limit = Number(options.limit ?? 50)
+  const base = realRoot(root)
+  const limitRaw = options.limit ?? 50
+  const limit = Number(limitRaw)
+  if (!Number.isInteger(limit) || limit < 1) throw new UsageError(`--limit 必須是正整數：${limitRaw}`)
+
   const results = []
   for (const scope of allowed) {
     if (scopeFilter && scope !== scopeFilter) continue
-    for (const file of walk(root, join(root, scope))) {
-      const rel = relOf(root, file)
+    for (const file of walk(base, join(base, scope))) {
+      const rel = relOf(base, file)
       const visibility = visibilityOf(config, rel)
       if (!canRead(config, role, visibility)) continue
       const text = readFileSync(file, 'utf8')

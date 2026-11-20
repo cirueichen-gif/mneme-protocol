@@ -395,3 +395,94 @@ test('writeback.requireConfirm 設成 false 的設定要被拒絕載入', () => 
     assert.match(result.stderr, /requireConfirm/)
   })
 })
+
+// ── 第二輪審查的回歸測試 ─────────────────────────
+
+test('記憶庫本身是 junction 時，recall／search 的結果要跟直連一致', () => {
+  const temp = mkdtempSync(join(tmpdir(), 'mneme-link-'))
+  try {
+    const real = join(temp, 'real-lib')
+    cpSync(ROOT, real, { recursive: true })
+    const link = join(temp, 'link-lib')
+    if (!linkDir(real, link)) return // 環境不允許建連結
+
+    const direct = json(run(CLI, ['recall', '--root', real, '--as', 'alpha']))
+    const viaLink = json(run(CLI, ['recall', '--root', link, '--as', 'alpha']))
+    assert.equal(viaLink.count, direct.count)
+    for (const file of viaLink.files) {
+      assert.equal(file.path.startsWith('..'), false, `path 跑到庫外：${file.path}`)
+      assert.notEqual(file.visibility, 'mixed')
+    }
+    assert.deepEqual(viaLink.files.map(f => f.path).sort(), direct.files.map(f => f.path).sort())
+
+    const hit = json(run(CLI, ['search', '--root', link, '--as', 'alpha', '無糖綠']))
+    assert.equal(hit.count, 1, '透過連結也要搜得到')
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test('audit 路徑不能爬到記憶庫外', () => {
+  withTempLibrary((library, temp) => {
+    const configPath = join(library, 'mneme.json')
+    const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
+    cfg.writeback.audit = 'a/../../escaped.jsonl'
+    writeFileSync(configPath, JSON.stringify(cfg, null, 2), 'utf8')
+    const { draft } = prepare(library, temp)
+    const result = run(WRITE, ['commit', '--root', library, '--as', 'alpha', '--ack-role', 'alpha', '--draft', draft, '--confirm'])
+    assert.equal(result.status, 1)
+    assert.equal(existsSync(join(temp, 'escaped.jsonl')), false)
+  })
+})
+
+test('draft 之後改來源檔 → sha 不符，拒收', () => {
+  withTempLibrary((library, temp) => {
+    const { draft, sourcePath } = prepare(library, temp)
+    writeFileSync(sourcePath, '來源被改過了，這裡沒有那句話。', 'utf8')
+    const result = run(WRITE, ['commit', '--root', library, '--as', 'alpha', '--ack-role', 'alpha', '--draft', draft, '--confirm'])
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /sha256 不符/)
+  })
+})
+
+test('太短的 quote 不算出處', () => {
+  withTempLibrary((library, temp) => {
+    const { draft } = prepare(library, temp, {
+      notes: ['- statement: x。', '  quote: 最', '  privacy: private', ''].join('\n')
+    })
+    const result = run(WRITE, ['commit', '--root', library, '--as', 'alpha', '--ack-role', 'alpha', '--draft', draft, '--confirm'])
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /太短/)
+  })
+})
+
+test('已提交的草稿再次預覽，要回「預覽」而不是「已提交」', () => {
+  withTempLibrary((library, temp) => {
+    const { draft } = prepare(library, temp)
+    const args = ['commit', '--root', library, '--as', 'alpha', '--ack-role', 'alpha', '--draft', draft, '--confirm']
+    assert.equal(json(run(WRITE, args)).written, true)
+    const preview = json(run(WRITE, ['commit', '--root', library, '--as', 'alpha', '--ack-role', 'alpha', '--draft', draft]))
+    assert.match(preview.reason, /只做預覽/)
+  })
+})
+
+test('--limit 不是正整數要報錯', () => {
+  for (const value of ['abc', '0', '-3']) {
+    const result = run(CLI, ['search', '--root', ROOT, '--as', 'owner', '--limit', value, '無糖綠'])
+    assert.equal(result.status, 2, `--limit ${value}`)
+  }
+})
+
+test('唯一可寫分區是 persona 的角色，連 draft 都不該成功', () => {
+  withTempLibrary((library, temp) => {
+    const configPath = join(library, 'mneme.json')
+    const cfg = JSON.parse(readFileSync(configPath, 'utf8'))
+    cfg.roles.alpha.write = ['persona']
+    writeFileSync(configPath, JSON.stringify(cfg, null, 2), 'utf8')
+    const sourcePath = join(temp, 'source.txt')
+    writeFileSync(sourcePath, SOURCE, 'utf8')
+    const result = run(WRITE, ['draft', '--root', library, '--as', 'alpha', '--from', sourcePath])
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /沒有可回寫的分區/)
+  })
+})

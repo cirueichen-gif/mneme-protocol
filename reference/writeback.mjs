@@ -11,10 +11,10 @@
 //   node reference/writeback.mjs commit --root "D:\記憶庫" --as alpha --ack-role alpha \
 //        --draft _drafts/2026-11-20.alpha.md --confirm
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { canWrite, loadConfig, realRoot, safeRel, writableScopes } from './acl.mjs'
+import { isInsideReal, loadConfig, realRoot, safeRel, writableScopes } from './acl.mjs'
 
 const PRIVACY = new Set(['public', 'private', 'secret'])
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024
@@ -93,12 +93,22 @@ function internalDir(config, root, value, fallback) {
   return rel
 }
 
+// 回寫可用的分區：角色的可寫清單扣掉 L0 與 persona（人格層只能由人改）
+function writeScopes(config, role) {
+  return writableScopes(config, role).filter(scope => {
+    const entry = config.scopes[scope] ?? {}
+    const layer = entry.layer ?? 'L2'
+    const visibility = entry.visibility ?? 'mixed'
+    return layer !== 'L0' && visibility !== 'persona'
+  })
+}
+
 function parseFrontMatter(text) {
   const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text)
   if (!match) return { meta: {}, body: text }
   const meta = {}
   for (const line of match[1].split(/\r?\n/)) {
-    const pair = /^([A-Za-z_]+):\s*(.*)$/.exec(line)
+    const pair = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line)
     if (pair) meta[pair[1]] = pair[2].trim()
   }
   return { meta, body: text.slice(match[0].length) }
@@ -126,6 +136,8 @@ function parseEntries(body) {
   return entries
 }
 
+const MIN_QUOTE_CHARS = 6 // 太短的片段沒有辨識力（單一個字不算出處）
+
 function validateEntries(entries) {
   if (!entries.length) throw new Error('草稿裡沒有任何條目（需要 - statement: / quote: / privacy: 三欄）')
   entries.forEach((entry, index) => {
@@ -134,17 +146,14 @@ function validateEntries(entries) {
     if (!entry.quote) throw new Error(`第 ${no} 條缺少 quote（回寫必須有逐字出處）`)
     if (!entry.privacy) throw new Error(`第 ${no} 條缺少 privacy（public / private / secret）`)
     if (!PRIVACY.has(entry.privacy)) throw new Error(`第 ${no} 條的 privacy 不合法：${entry.privacy}`)
+    if ([...entry.quote].length < MIN_QUOTE_CHARS) {
+      throw new Error(`第 ${no} 條的 quote 太短（至少 ${MIN_QUOTE_CHARS} 個字）：${entry.quote}`)
+    }
   })
 }
 
 function resolveTargetScope(config, root, role, args) {
-  const writable = writableScopes(config, role).filter(scope => {
-    const entry = config.scopes[scope] ?? {}
-    const layer = entry.layer ?? 'L2'
-    const visibility = entry.visibility ?? 'mixed'
-    // L0 與 persona 分區是人格層，不接受回寫
-    return layer !== 'L0' && visibility !== 'persona'
-  })
+  const writable = writeScopes(config, role)
   if (!writable.length) throw new Error(`角色 ${role} 沒有可回寫的分區（L0／persona 不接受回寫）`)
 
   if (typeof args.scope === 'string') {
@@ -160,7 +169,7 @@ function resolveTargetScope(config, root, role, args) {
 
 function cmdDraft(config, root, role, args) {
   const draftsDir = internalDir(config, root, config.writeback?.dir, '_drafts')
-  if (!writableScopes(config, role).length) throw new Error(`角色 ${role} 沒有可寫分區，不能回寫`)
+  if (!writeScopes(config, role).length) throw new Error(`角色 ${role} 沒有可回寫的分區，不能回寫`)
 
   let text
   let sourceLabel
@@ -207,8 +216,11 @@ function cmdDraft(config, root, role, args) {
 }
 
 function auditPath(config, root) {
-  const dir = internalDir(config, root, (config.writeback?.audit ?? '_audit/writeback.jsonl').split('/')[0], '_audit')
-  const file = (config.writeback?.audit ?? '_audit/writeback.jsonl').split('/').slice(1).join('/') || 'writeback.jsonl'
+  // 整條相對路徑都要驗：不能被 "a/../../x.jsonl" 爬到記憶庫外面
+  const rel = safeRel(root, config.writeback?.audit ?? '_audit/writeback.jsonl')
+  const parts = rel.split('/')
+  const file = parts.pop()
+  const dir = parts.join('/') || '_audit'
   return { dir, file, abs: join(realRoot(root), dir, file) }
 }
 
@@ -268,15 +280,26 @@ function cmdCommit(config, root, role, args) {
   const entries = parseEntries(body)
   validateEntries(entries)
 
-  // 5. quote 必須逐字出現在來源裡（協定自稱的硬門檻）
+  // 5. quote 必須逐字出現在來源裡，而且來源必須還是 draft 當時那一份
   let sourceText = null
+  let sourceShaNow = null
   if (meta.source && meta.source !== 'stdin' && existsSync(meta.source)) {
     try {
-      if (statSync(meta.source).size <= MAX_SOURCE_BYTES) sourceText = readFileSync(meta.source, 'utf8')
+      if (statSync(meta.source).size <= MAX_SOURCE_BYTES) {
+        sourceText = readFileSync(meta.source, 'utf8')
+        sourceShaNow = sha256(sourceText)
+      }
     } catch {
       sourceText = null
     }
   }
+
+  // draft 之後才改來源檔，等於繞過驗證：sha 對不上就重來
+  if (sourceText && meta.sourceSha256 && meta.sourceSha256 !== sourceShaNow) {
+    throw new Error('來源檔在 draft 之後被改過（sha256 不符），請重新產生草稿')
+  }
+
+  const quoteOccurrences = []
   if (!sourceText) {
     if (!args['no-verify']) {
       throw new Error('找不到草稿記錄的來源檔，無法核對 quote。確定要寫請加 --no-verify（會留下稽核紀錄）')
@@ -284,26 +307,28 @@ function cmdCommit(config, root, role, args) {
   } else {
     const haystack = norm(sourceText)
     entries.forEach((entry, index) => {
-      if (!haystack.includes(norm(entry.quote))) {
+      const needle = norm(entry.quote)
+      if (!haystack.includes(needle)) {
         throw new Error(`第 ${index + 1} 條的 quote 在來源裡找不到，整批拒收：「${entry.quote}」`)
       }
+      quoteOccurrences.push(haystack.split(needle).length - 1)
     })
+  }
+
+  // 來源是不是記憶庫自己的檔案：讓屋主一眼看出「這條的來源是 agent 自己寫的筆記」
+  let sourceInArchive = false
+  if (sourceText) {
+    try {
+      sourceInArchive = isInsideReal(root, realpathSync(meta.source))
+    } catch {
+      sourceInArchive = false
+    }
   }
 
   // 6. 落點分區
   const scope = resolveTargetScope(config, root, role, args)
   const targetRel = `${scope}/${datePart()}.md`
   const targetAbs = join(realRoot(root), targetRel)
-
-  // 7. 冪等：同一份草稿不重複寫
-  if (!args.force) {
-    const done = readAudit(config, root).some(
-      record => record.status === 'done' && record.draft === draftRel && record.draftSha === draftSha
-    )
-    if (done) {
-      return { role, draft: draftRel, target: targetRel, written: false, reason: '這份草稿已經提交過（要重寫請加 --force）' }
-    }
-  }
 
   const summary = {
     role,
@@ -314,22 +339,47 @@ function cmdCommit(config, root, role, args) {
     scope,
     entries: entries.length,
     verified: Boolean(sourceText),
+    source: meta.source ?? null,
+    sourceSha: sourceShaNow,
+    sourceInArchive,
+    quoteOccurrences,
     bytes: Buffer.byteLength(body)
   }
 
+  // 7. 預覽先於冪等：沒帶 --confirm 就只是預覽
   if (!args.confirm) {
     return { ...summary, written: false, reason: '缺少 --confirm，只做預覽' }
   }
 
-  // 8. 先立帳、再寫入、後結案：任何一步失敗都留得下痕跡
+  // 8. 冪等：同一份草稿不重複寫
+  if (!args.force) {
+    const done = readAudit(config, root).some(
+      record => record.status === 'done' && record.draft === draftRel && record.draftSha === draftSha
+    )
+    if (done) {
+      return { ...summary, written: false, reason: '這份草稿已經提交過（要重寫請加 --force）' }
+    }
+  }
+
+  // 9. 先立帳、再寫入、後結案：任何一步失敗都留得下痕跡
   appendAudit(config, root, { at: stamp(), status: 'pending', ...summary })
 
   const rendered = entries
     .map(entry => `- statement: ${entry.statement}\n  quote: ${entry.quote}\n  privacy: ${entry.privacy}`)
     .join('\n')
-  if (!existsSync(dirname(targetAbs))) mkdirSync(dirname(targetAbs), { recursive: true })
-  const marker = `\n\n<!-- mneme:writeback role=${role} at=${stamp()} draft=${draftRel} -->\n`
-  appendFileSync(targetAbs, marker + rendered + '\n', 'utf8')
+  try {
+    if (!existsSync(dirname(targetAbs))) mkdirSync(dirname(targetAbs), { recursive: true })
+    const marker = `\n\n<!-- mneme:writeback role=${role} at=${stamp()} draft=${draftRel} -->\n`
+    appendFileSync(targetAbs, marker + rendered + '\n', 'utf8')
+  } catch (error) {
+    appendAudit(config, root, {
+      at: stamp(),
+      status: 'failed',
+      error: String(error?.message ?? error),
+      ...summary
+    })
+    throw error
+  }
 
   appendAudit(config, root, { at: stamp(), status: 'done', ...summary })
 

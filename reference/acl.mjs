@@ -42,9 +42,12 @@ export function loadConfig(root) {
 }
 
 // 把使用者輸入的相對路徑收斂到記憶庫內部；越界就丟錯。
+// 跨平台：Windows 風格的磁碟路徑在 POSIX 上不是絕對路徑，也要擋。
+const WINDOWS_ABSOLUTE = /^[A-Za-z]:[\\/]/
+
 export function safeRel(root, input) {
   if (typeof input !== 'string' || !input.trim()) throw new Error('路徑不可為空')
-  if (isAbsolute(input)) throw new Error('路徑必須是相對路徑')
+  if (isAbsolute(input) || WINDOWS_ABSOLUTE.test(input)) throw new Error('路徑必須是相對路徑')
   const base = resolve(root)
   const abs = resolve(base, input)
   const rel = relative(base, abs)

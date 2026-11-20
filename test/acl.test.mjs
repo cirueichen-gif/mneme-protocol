@@ -56,6 +56,8 @@ test('未知角色直接拒絕，不會退回 owner', () => {
 
 test('路徑越界被擋', () => {
   assert.throws(() => safeRel(ROOT, '../outside.md'), /超出記憶庫範圍/)
+  assert.throws(() => safeRel(ROOT, resolve(ROOT, '..', 'outside.md')), /相對路徑/)
+  // Windows 風格的絕對路徑在 Linux 上也要擋（CI 跨平台）
   assert.throws(() => safeRel(ROOT, 'C:\\Windows\\win.ini'), /相對路徑/)
   assert.equal(safeRel(ROOT, 'diary/2026-11-20.md'), 'diary/2026-11-20.md')
 })

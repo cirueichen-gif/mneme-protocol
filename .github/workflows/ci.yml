@@ -30,10 +30,16 @@ jobs:
       - name: 公開 repo 不得含記憶資料
         run: |
           set -e
-          if git ls-files | grep -Ei '\.(db|sqlite3?)$'; then
+          if git ls-files | grep -Ei '\.(db|sqlite3?|db-wal|db-journal)$'; then
             echo "✗ repo 內出現資料庫檔"; exit 1
           fi
-          if git ls-files | grep -Ei '(^|/)(\.roles\.json|api\.json|\.env)$'; then
+          if git ls-files | grep -Ei '(^|/)(\.roles\.json|api\.json|\.env|\.env\..*)$'; then
             echo "✗ repo 內出現憑證檔"; exit 1
           fi
-          echo "✓ 沒有資料庫與憑證檔"
+          if git ls-files | grep -Ei '\.(pem|key)$'; then
+            echo "✗ repo 內出現金鑰檔"; exit 1
+          fi
+          if git ls-files | grep -E '\.jsonl$' | grep -v '^test/'; then
+            echo "✗ repo 內出現執行紀錄（jsonl）"; exit 1
+          fi
+          echo "✓ 沒有資料庫、憑證、金鑰與紀錄檔"

@@ -36,11 +36,13 @@ Mneme Protocol 把這四件事變成三份文件 + 一支零依賴的工具：
 ### 2. 把 repo 給你的 Agent
 
 > 「這是 Mneme Protocol：https://github.com/你/mneme-protocol
-> 我的記憶庫在 `D:\記憶庫`，我是屋主，請照 AGENTS.md 第 3 節開工。」
+> 我的記憶庫在 `D:\記憶庫`。你要我扮演的角色是 `owner`（要逐字寫角色名，不要寫『我是屋主』）。」
+
+角色**必須明講**。Agent 沒拿到角色時會停下來問——這是設計，不是它笨。
 
 ### 3. Agent 會自己照著做
 
-它會先讀 `AGENTS.md`、確認資料夾、確認身分、再開始查。不需要你教它指令。
+它會先跑 `mneme.mjs info`、確認資料夾、問清楚角色，才開始查。不需要你教它指令。
 
 ---
 
@@ -53,16 +55,28 @@ node reference/mneme.mjs read   --root "D:\記憶庫" --as owner "diary/2026-11-
 node reference/mneme.mjs recall --root "D:\記憶庫" --as owner
 ```
 
-零依賴，只要 Node.js 22+（用到 `node:fs`／`node:path`／`node:crypto`）。
+零依賴，只要 Node.js 22+（用到 `node:fs`／`node:path`／`node:crypto`，沒有 npm 套件）。
 
-回寫：
+回寫（兩段式，身分要寫兩次）：
 
 ```bash
 node reference/writeback.mjs draft  --root "D:\記憶庫" --as sister --from notes.txt
-node reference/writeback.mjs commit --root "D:\記憶庫" --as sister --draft _drafts/2026-11-20.sister.md --confirm
+node reference/writeback.mjs commit --root "D:\記憶庫" --as sister --ack-role sister \
+  --draft _drafts/2026-11-20.sister.md --confirm
 ```
 
-**兩段式**：`draft` 只產生草稿，`commit` 才落盤，而且 `commit` 必須帶 `--confirm`。
+**draft 只產生草稿；commit 才落盤，而且必須帶 `--confirm`、必須再次確認身分（`--ack-role`），
+且每一條的 `quote` 都要能在來源檔裡逐字找到，否則整批退回。**
+
+---
+
+## 它擋不住什麼（誠實邊界）
+
+這是**程式層**的權限，不是作業系統層。如果呼叫端跟記憶庫在同一個 OS 帳號下執行，
+它可以不經過這些工具、直接開檔，也可以建硬連結把別人的檔案「搬」進自己的分區。
+
+要真正的隔離：讓 Agent 用另一個 OS 帳號跑，且不給那個帳號記憶庫的讀取權限，只留查詢介面的連線。
+本協定能保證的是「照著用它，就不會誤讀、誤寫、把幻覺寫進記憶」。
 
 ---
 

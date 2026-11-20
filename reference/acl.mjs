@@ -6,7 +6,7 @@
 //   3. 判定在「取資料之前」，不是撈完再過濾。
 //   4. 無權限與不存在回傳相同結果。
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 export const MIXED = 'mixed'
@@ -38,6 +38,10 @@ export function loadConfig(root) {
   if (!Array.isArray(owner.read) || !owner.read.includes('*')) {
     throw new Error('owner 的 read 必須包含 "*"')
   }
+  // 兩段式回寫不可關閉：讀到 false 就是無效設定
+  if (config.writeback?.requireConfirm === false) {
+    throw new Error('writeback.requireConfirm 不可設為 false（兩段式回寫不得關閉）')
+  }
   return config
 }
 
@@ -48,6 +52,8 @@ const WINDOWS_ABSOLUTE = /^[A-Za-z]:[\\/]/
 export function safeRel(root, input) {
   if (typeof input !== 'string' || !input.trim()) throw new Error('路徑不可為空')
   if (isAbsolute(input) || WINDOWS_ABSOLUTE.test(input)) throw new Error('路徑必須是相對路徑')
+  // Windows ADS（file.md::$DATA）與 NUL 都不得穿過
+  if (input.includes(':') || input.includes('\0')) throw new Error('路徑含有不允許的字元')
   const base = resolve(root)
   const abs = resolve(base, input)
   const rel = relative(base, abs)
@@ -55,9 +61,40 @@ export function safeRel(root, input) {
   return toPosix(rel)
 }
 
+export function realRoot(root) {
+  try {
+    return realpathSync(resolve(root))
+  } catch {
+    return resolve(root)
+  }
+}
+
+// 真實路徑是否仍在記憶庫內（擋符號連結／junction 逃逸）
+export function isInsideReal(root, absPath) {
+  const base = realRoot(root)
+  const back = relative(base, absPath)
+  return back === '' || (!back.startsWith('..') && !isAbsolute(back))
+}
+
+// 把相對路徑解析成真實的絕對路徑；越界、不存在、指向外面一律同一個錯誤。
+export function resolveInside(root, relPath) {
+  const rel = safeRel(root, relPath)
+  const abs = resolve(realRoot(root), rel)
+  let real
+  try {
+    real = realpathSync(abs)
+  } catch {
+    throw new Error('找不到檔案，或你無權讀取。')
+  }
+  if (!isInsideReal(root, real)) throw new Error('找不到檔案，或你無權讀取。')
+  return real
+}
+
 export function scopeOf(relPath) {
-  const first = toPosix(relPath).split('/')[0] ?? ''
-  if (!first) return null
+  const parts = toPosix(relPath).split('/')
+  // 根目錄的檔案（例如 mneme.json）不屬於任何分區 → 視為 mixed
+  if (parts.length < 2) return null
+  const first = parts[0]
   if (INTERNAL_PREFIXES.includes(first)) return null
   return first
 }
@@ -69,12 +106,12 @@ export function visibilityOf(config, relPath) {
 }
 
 export function roleOf(config, role) {
-  const entry = config.roles?.[role]
-  if (!entry) {
+  // 用 hasOwn：避免 constructor / __proto__ / toString 走原型鏈「通過」檢查
+  if (typeof role !== 'string' || !Object.hasOwn(config.roles ?? {}, role)) {
     const known = Object.keys(config.roles ?? {}).join('、')
     throw new Error(`未知角色：${role}（可用：${known}）`)
   }
-  return entry
+  return config.roles[role]
 }
 
 export function canRead(config, role, visibility) {

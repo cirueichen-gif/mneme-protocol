@@ -49,15 +49,16 @@
     }
   },
   "writeback": {
-    "dir": "_drafts",                                    // 草稿目錄，預設 _drafts
+    "dir": "_drafts",                                    // 草稿目錄，預設 _drafts（必須單層且在 root 內）
     "audit": "_audit/writeback.jsonl",                   // 稽核檔，預設此值
-    "requireConfirm": true                               // 預設 true，不可由角色關閉
+    "requireConfirm": true                               // 必須為 true；設成 false 的設定要被拒絕載入
   }
 }
 ```
 
 **紅線：`mneme.json` 不得包含任何 token、金鑰、密碼。**
 身分驗證屬於實作層（本機 CLI 用 `--as`，HTTP 用標頭），協定只定義「角色 → 可見性」的對應。
+`requireConfirm: false` 不是「關掉確認」的意思，而是無效設定——實作讀到必須拒絕啟動，因為兩段式回寫不可關閉。
 
 ---
 
@@ -90,7 +91,21 @@ relPath → scope（第一段目錄）→ visibility（scopes[scope].visibility 
 
 - 判定必須發生在**取資料之前**（查詢層），不是撈完再過濾。
 - 無權限與不存在**回傳相同結果**，不洩漏「這裡有東西但不能給你」。
-- 路徑必須解析後仍在 `<root>` 之內；`..`、絕對路徑、符號連結逃逸一律拒絕。
+- 路徑必須以**真實路徑**（`realpath`）驗證後仍在 `<root>` 之內。下列一律拒絕：
+  - `..`、絕對路徑、Windows 磁碟路徑（即使在 POSIX 上執行）
+  - 符號連結／junction 指向 `<root>` 之外（走訪與讀取都要檢查）
+  - 含 `:`（Windows ADS，例如 `file.md::$DATA`）或 NUL 的路徑
+- 根目錄的檔案（例如 `mneme.json`）不屬於任何分區，視為 `mixed`。
+
+### 4.1 協定擋不到的事（誠實邊界）
+
+這是**程式層**的權限，不是作業系統層。若呼叫者與資料在同一個 OS 帳號下執行，以下可以繞過：
+
+- 直接開檔（不經過本協定的工具）
+- 硬連結（hardlink）：檔案在目錄樹內，`realpath` 看不出它與外部檔案同一個 inode
+
+要真正的隔離，必須用不同的 OS 帳號執行呼叫端，且不給該帳號資料夾的讀取權限，只留查詢介面的連線。
+
 
 ---
 
@@ -101,8 +116,12 @@ relPath → scope（第一段目錄）→ visibility（scopes[scope].visibility 
 ### 5.0 共同前提：身分必須被明確指定
 
 - **實作不得默默預設角色。** `owner` 不是預設值，是必須被指定的身分。
-- 呼叫端沒有帶角色時：CLI 至少要在 stderr 告警；HTTP 一律 401。
-- 不得「先以 owner 查詢、之後再想辦法縮小範圍」。
+- 涉及資料的指令（`recall`、`search`、`read`、`draft`、`commit`）缺少角色時：
+  **必須以非 0 退出碼拒絕執行，且不得輸出任何資料。** stderr 告警不算拒絕。
+- `info` 與 `matrix` 不需要角色（只讀設定，不讀記憶）。
+- HTTP 介面缺少或帶錯憑證一律 401。
+- **寫入端再加一道**：`commit` 必須同時提供 `--as` 與 `--ack-role`，兩者不同就拒收。
+  這道雙錄讓「agent 自己決定身分」留下可稽核的意圖紀錄。
 
 ### 5.1 `info`
 
@@ -138,33 +157,50 @@ relPath → scope（第一段目錄）→ visibility（scopes[scope].visibility 
 輸出：寫入 `<writeback.dir>/<YYYY-MM-DD>.<role>.md`，回傳該路徑。
 **不得**寫入任何正式分區。
 
-草稿格式：
+草稿格式（front matter 只在檔案第一次建立時寫一次，之後只 append 條目）：
 
 ```markdown
 ---
 derived: true
 role: alpha
 created: 2026-11-20T14:20:00+08:00
-source: <來源描述>
+source: <來源檔絕對路徑，或 stdin>
+sourceSha256: <來源內容的 sha256>
 ---
 
-## 條目
 - statement: 半年後仍成立的一句話
   quote: 原文逐字片段
   privacy: private
 ```
 
+`<writeback.dir>` 必須是單層目錄且在 `<root>` 內；設定成 `../x` 必須被拒絕。
+
 ### 5.6 `commit`（寫入第二段）
 
-輸入：草稿路徑、`--confirm`。
-沒有 `--confirm` 時**只預覽不落盤**（dry run），退出碼 0，輸出「未寫入」。
-有 `--confirm` 時：追加到 `<可寫分區>/<YYYY-MM-DD>.md`，並在 `_audit/writeback.jsonl` 追加一筆：
+輸入：`--as`、`--ack-role`（必須與 `--as` 相同）、`--draft`、`--confirm`；可選 `--scope`、`--force`、`--no-verify`。
+
+必經的六道檢查，任一不過就整批拒收：
+
+1. **身分雙錄**：`--as` 與 `--ack-role` 不同 → 拒收。
+2. **草稿來源**：草稿必須在 `<writeback.dir>` 內；front matter 的 `role` 必須等於本次 `--as`。
+3. **結構完整**：每一條都要有 `statement`、`quote`、`privacy`；`privacy` 僅限 `public` / `private` / `secret`。
+4. **quote 逐字核對**：拿 front matter 的 `source` 讀回來源檔，每一條的 `quote` 必須是來源的逐字子字串（比對前做 NFKC 正規化與空白收斂）。來源檔不存在或不可讀時，除非明確加 `--no-verify`，否則拒收；`--no-verify` 會記入稽核。
+5. **落點合法**：`L0` 與 `visibility: persona` 的分區**不接受回寫**（人格層只能由人改）。角色有多個可寫分區時必須用 `--scope` 指定。
+6. **冪等**：同一份草稿（同 sha256）已提交過就跳過，除非 `--force`。
+
+沒有 `--confirm` 時只做預覽（`written: false`），不落盤。
+
+寫入流程必須是「**先立帳、再寫入、後結案**」：先寫一筆 `status: "pending"` 的稽核，再 append 目標檔，最後寫 `status: "done"`。任何一步失敗都要留下痕跡。
+
+稽核位置 `<writeback.audit>`（預設 `_audit/writeback.jsonl`），每筆欄位：
 
 ```json
-{ "at": "ISO", "role": "alpha", "draft": "_drafts/…", "target": "diary/2026-11-20.md", "bytes": 123 }
+{ "at": "ISO", "status": "pending|done", "role": "alpha", "ackRole": "alpha",
+  "draft": "_drafts/…", "draftSha": "…", "target": "diary/2026-11-20.md",
+  "scope": "diary", "entries": 2, "verified": true, "bytes": 123 }
 ```
 
-寫入方式一律**追加**，不得覆寫既有檔案。
+寫入方式一律**追加**，不得覆寫既有檔案。目標記憶檔內不寫 front matter，只留一條 `<!-- mneme:writeback … -->` 標記。
 
 ---
 

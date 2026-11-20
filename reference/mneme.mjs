@@ -1,19 +1,38 @@
 #!/usr/bin/env node
-// mneme.mjs — 查詢接口（info / recall / search / read），零依賴，Node 22+
+// mneme.mjs — 查詢接口（info / matrix / recall / search / read），零依賴，Node 22+
 //
 //   node reference/mneme.mjs info   --root "D:\記憶庫"
 //   node reference/mneme.mjs recall --root "D:\記憶庫" --as owner
 //   node reference/mneme.mjs search --root "D:\記憶庫" --as alpha "關鍵字"
 //   node reference/mneme.mjs read   --root "D:\記憶庫" --as alpha "diary/2026-11-20.md"
+//
+// 涉及資料的指令一律必須帶 --as <角色>；缺少時以退出碼 2 拒絕執行（不會默默當 owner）。
 
-import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { readdirSync, readFileSync, realpathSync } from 'node:fs'
+import { join, relative, resolve } from 'node:path'
 import {
-  MIXED, canRead, describe, loadConfig, matrix, readableScopes, safeRel, visibilityOf
+  MIXED, canRead, describe, isInsideReal, loadConfig, matrix, readableScopes, realRoot, resolveInside, scopeOf, visibilityOf
 } from './acl.mjs'
 
 const TEXT_EXT = new Set(['.md', '.txt', '.json', '.jsonl', '.csv', '.yaml', '.yml'])
 const SKIP_DIRS = new Set(['_drafts', '_audit', 'node_modules', '.git'])
+const DENY = '找不到檔案，或你無權讀取。'
+
+const USAGE = `用法：
+  mneme.mjs info   --root <記憶庫路徑>
+  mneme.mjs matrix --root <記憶庫路徑>
+  mneme.mjs recall --root <記憶庫路徑> --as <角色>
+  mneme.mjs search --root <記憶庫路徑> --as <角色> [--scope <分區>] [--limit N] <關鍵字...>
+  mneme.mjs read   --root <記憶庫路徑> --as <角色> <相對路徑>
+
+角色必須由屋主指定，沒有預設值。info / matrix 不需要角色。`
+
+class UsageError extends Error {
+  constructor(message) {
+    super(message)
+    this.code = 'USAGE'
+  }
+}
 
 function parseArgs(argv) {
   const args = { _: [] }
@@ -23,33 +42,34 @@ function parseArgs(argv) {
       const key = token.slice(2)
       const next = argv[i + 1]
       if (next === undefined || next.startsWith('--')) args[key] = true
-      else { args[key] = next; i++ }
-    } else {
-      args._.push(token)
-    }
+      else {
+        args[key] = next
+        i++
+      }
+    } else args._.push(token)
   }
+  if (args.as === true) throw new UsageError('--as 後面要接角色名稱')
   return args
 }
 
 function requireRoot(args) {
-  if (typeof args.root !== 'string') throw new Error('缺少 --root <記憶庫路徑>')
+  if (typeof args.root !== 'string') throw new UsageError('缺少 --root <記憶庫路徑>')
   return resolve(args.root)
 }
 
+// 角色沒有預設值：沒帶就拒絕（退出碼 2），不會退回 owner。
 function requireRole(config, args) {
-  const explicit = typeof args.as === 'string'
-  const role = explicit ? args.as : 'owner'
-  if (!config.roles?.[role]) {
-    throw new Error(`未知角色：${role}（可用：${Object.keys(config.roles ?? {}).join('、')}）`)
+  if (typeof args.as !== 'string') {
+    throw new UsageError(`這個指令必須指定 --as <角色>（可用：${Object.keys(config.roles ?? {}).join('、')}）`)
   }
-  // 未指定 --as 時不默默當屋主：協定要求身分必須被明確指定
-  if (!explicit) {
-    console.error('⚠ 未指定 --as <角色>，本次以 owner 執行。角色應該由屋主指定，不是預設值。')
+  if (!Object.hasOwn(config.roles ?? {}, args.as)) {
+    throw new UsageError(`未知角色：${args.as}（可用：${Object.keys(config.roles ?? {}).join('、')}）`)
   }
-  return role
+  return args.as
 }
 
-function walk(dir, base = dir, out = []) {
+// 走訪檔案；目錄與檔案都要通過真實路徑檢查，擋掉符號連結／junction 逃逸。
+function walk(root, dir, out = []) {
   let entries
   try {
     entries = readdirSync(dir, { withFileTypes: true })
@@ -58,12 +78,28 @@ function walk(dir, base = dir, out = []) {
   }
   for (const entry of entries) {
     if (entry.name.startsWith('.')) continue
+    const full = join(dir, entry.name)
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name)) continue
-      walk(join(dir, entry.name), base, out)
+      let real
+      try {
+        real = realpathSync(full)
+      } catch {
+        continue
+      }
+      if (!isInsideReal(root, real)) continue
+      walk(root, full, out)
     } else if (entry.isFile()) {
       const ext = entry.name.slice(entry.name.lastIndexOf('.'))
-      if (TEXT_EXT.has(ext)) out.push(join(dir, entry.name))
+      if (!TEXT_EXT.has(ext)) continue
+      let real
+      try {
+        real = realpathSync(full)
+      } catch {
+        continue
+      }
+      if (!isInsideReal(root, real)) continue
+      out.push(full)
     }
   }
   return out
@@ -81,25 +117,24 @@ function firstHeading(text) {
   return ''
 }
 
-function cmdInfo(config, root) {
-  return describe(config)
+function relOf(root, file) {
+  return relative(realRoot(root), file).split('\\').join('/')
 }
 
 function cmdRecall(config, root, role) {
   const scopes = readableScopes(config, role)
   const files = []
   for (const scope of scopes) {
-    const dir = join(root, scope)
-    for (const file of walk(dir)) {
-      const bytes = statSync(file).size
+    for (const file of walk(root, join(root, scope))) {
+      const rel = relOf(root, file)
       const text = readFileSync(file, 'utf8')
       files.push({
-        path: file.slice(root.length + 1).replaceAll('\\', '/'),
+        path: rel,
         scope,
-        visibility: visibilityOf(config, file.slice(root.length + 1)),
+        visibility: visibilityOf(config, rel),
         layer: config.scopes[scope]?.layer ?? 'L2',
         budgetKB: config.scopes[scope]?.budgetKB ?? null,
-        bytes,
+        bytes: Buffer.byteLength(text),
         firstHeading: firstHeading(text)
       })
     }
@@ -107,102 +142,126 @@ function cmdRecall(config, root, role) {
   const order = { L0: 0, L1: 1, L2: 2 }
   files.sort((a, b) => (order[a.layer] ?? 9) - (order[b.layer] ?? 9) || a.path.localeCompare(b.path))
 
-  // 只回清單與標題，不回全文；超預算只標記，不自動截斷（交給呼叫端決定）
-  const seen = new Map()
+  const used = new Map()
   for (const file of files) {
     if (file.budgetKB == null) continue
-    const used = seen.get(file.scope) ?? 0
-    file.truncated = used + file.bytes > file.budgetKB * 1024
-    seen.set(file.scope, used + file.bytes)
+    const spent = used.get(file.scope) ?? 0
+    file.overBudget = spent + file.bytes > file.budgetKB * 1024
+    used.set(file.scope, spent + file.bytes)
   }
   return { role, scopes, count: files.length, files }
 }
 
 function cmdSearch(config, root, role, keywords, options) {
-  const terms = keywords.map(norm).filter(Boolean)
-  if (!terms.length) throw new Error('請提供至少一個關鍵字')
+  const terms = keywords.map(word => word.trim()).map(norm).filter(Boolean)
+  if (!terms.length) throw new UsageError('請提供至少一個非空白關鍵字')
+
   const allowed = readableScopes(config, role)
   const scopeFilter = typeof options.scope === 'string' ? options.scope : null
-  if (scopeFilter && !allowed.includes(scopeFilter)) {
-    throw new Error(`角色 ${role} 不能讀分區 ${scopeFilter}`)
+  if (scopeFilter) {
+    if (!Object.hasOwn(config.scopes ?? {}, scopeFilter)) {
+      throw new UsageError(`未註冊的分區：${scopeFilter}（可用：${Object.keys(config.scopes ?? {}).join('、')}）`)
+    }
+    if (!allowed.includes(scopeFilter)) {
+      throw new Error(`角色 ${role} 不能讀分區 ${scopeFilter}`)
+    }
   }
+
   const limit = Number(options.limit ?? 50)
   const results = []
-
   for (const scope of allowed) {
     if (scopeFilter && scope !== scopeFilter) continue
-    for (const file of walk(join(root, scope))) {
-      const rel = file.slice(root.length + 1).replaceAll('\\', '/')
+    for (const file of walk(root, join(root, scope))) {
+      const rel = relOf(root, file)
       const visibility = visibilityOf(config, rel)
       if (!canRead(config, role, visibility)) continue
       const text = readFileSync(file, 'utf8')
       const haystack = norm(text)
       if (!terms.every(term => haystack.includes(term))) continue
+
+      // 只把「全部關鍵字都命中的那一行」當證據
       const lines = text.split(/\r?\n/)
-      const lineIndex = lines.findIndex(line => norm(line).includes(terms[0]))
+      const index = lines.findIndex(line => terms.every(term => norm(line).includes(term)))
       results.push({
         path: rel,
         scope,
         visibility,
-        line: lineIndex + 1,
-        snippet: (lines[lineIndex] ?? '').trim().slice(0, 160)
+        line: index + 1,
+        snippet: index >= 0 ? lines[index].trim().slice(0, 160) : ''
       })
-      if (results.length >= limit) return { role, keywords, count: results.length, truncated: true, results }
+      if (results.length >= limit) {
+        return { role, keywords, count: results.length, limitReached: true, results }
+      }
     }
   }
-  return { role, keywords, count: results.length, truncated: false, results }
+  return { role, keywords, count: results.length, limitReached: false, results }
 }
 
 function cmdRead(config, root, role, target) {
-  const rel = safeRel(root, target)
-  const visibility = visibilityOf(config, rel)
-  // 無權限與不存在回同一個錯誤，不洩漏存在性
-  const deny = () => { throw new Error('找不到檔案，或你無權讀取。') }
-  if (!canRead(config, role, visibility)) deny()
+  let rel
+  try {
+    rel = resolveInside(root, target)
+  } catch {
+    throw new Error(DENY) // 越界、不存在、指向外面：同一個訊息
+  }
+  const relPath = relative(realRoot(root), rel).split('\\').join('/')
+  const visibility = visibilityOf(config, relPath)
+  if (!canRead(config, role, visibility)) throw new Error(DENY)
+
   let text
   try {
-    const abs = resolve(root, rel)
-    if (!statSync(abs).isFile()) deny()
-    text = readFileSync(abs, 'utf8')
+    text = readFileSync(rel, 'utf8')
   } catch {
-    deny()
+    throw new Error(DENY)
   }
-  return { path: rel, scope: rel.split('/')[0], visibility, bytes: Buffer.byteLength(text), content: text }
+  return { path: relPath, scope: scopeOf(relPath), visibility, bytes: Buffer.byteLength(text), content: text }
 }
 
-function print(value, json) {
-  if (json) return console.log(JSON.stringify(value, null, 2))
-  if (Array.isArray(value)) return console.log(value.map(v => JSON.stringify(v)).join('\n'))
+function print(value) {
   console.log(JSON.stringify(value, null, 2))
 }
 
 function main() {
-  const args = parseArgs(process.argv.slice(2))
-  const command = args._[0]
-  const json = Boolean(args.json)
-
+  let args
   try {
-    if (!command || command === 'help') {
-      console.log(readFileSync(new URL('./mneme.mjs', import.meta.url), 'utf8')
-        .split('\n').slice(1, 9).join('\n').replace(/^\/\/ ?/gm, ''))
-      return
-    }
-    const root = requireRoot(args)
-    const config = loadConfig(root)
-    const role = requireRole(config, args)
-
-    if (command === 'info') return print(cmdInfo(config, root), true)
-    if (command === 'matrix') return print(matrix(config), true)
-    if (command === 'recall') return print(cmdRecall(config, root, role), true)
-    if (command === 'search') return print(cmdSearch(config, root, role, args._.slice(1), args), true)
-    if (command === 'read') {
-      if (!args._[1]) throw new Error('請提供相對路徑')
-      return print(cmdRead(config, root, role, args._[1]), true)
-    }
-    throw new Error(`未知指令：${command}`)
+    args = parseArgs(process.argv.slice(2))
   } catch (error) {
     console.error(`✗ ${error.message}`)
-    process.exitCode = 1
+    console.error(USAGE)
+    process.exitCode = 2
+    return
+  }
+
+  const command = args._[0]
+  if (!command || command === 'help') {
+    console.log(USAGE)
+    return
+  }
+
+  try {
+    const root = requireRoot(args)
+    const config = loadConfig(root)
+
+    if (command === 'info') return print(describe(config))
+    if (command === 'matrix') return print(matrix(config))
+
+    const role = requireRole(config, args)
+    if (command === 'recall') return print(cmdRecall(config, root, role))
+    if (command === 'search') return print(cmdSearch(config, root, role, args._.slice(1), args))
+    if (command === 'read') {
+      if (!args._[1]) throw new UsageError('請提供相對路徑')
+      return print(cmdRead(config, root, role, args._[1]))
+    }
+    throw new UsageError(`未知指令：${command}`)
+  } catch (error) {
+    if (error.code === 'USAGE') {
+      console.error(`✗ ${error.message}`)
+      console.error(USAGE)
+      process.exitCode = 2
+    } else {
+      console.error(`✗ ${error.message}`)
+      process.exitCode = 1
+    }
   }
 }
 

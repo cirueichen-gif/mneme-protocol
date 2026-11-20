@@ -121,10 +121,17 @@ function relOf(base, file) {
   return relative(base, file).split('\\').join('/')
 }
 
-function cmdRecall(config, root, role) {
+function cmdRecall(config, root, role, scopeFilter = null) {
   // 一律以真實路徑為基準：記憶庫本身可能是 junction／symlink（Windows 很常見）
   const base = realRoot(root)
-  const scopes = readableScopes(config, role)
+  const readable = readableScopes(config, role)
+  if (scopeFilter) {
+    if (!Object.hasOwn(config.scopes ?? {}, scopeFilter)) {
+      throw new UsageError(`未註冊的分區：${scopeFilter}（可用：${Object.keys(config.scopes ?? {}).join('、')}）`)
+    }
+    if (!readable.includes(scopeFilter)) throw new Error(`角色 ${role} 不能讀分區 ${scopeFilter}`)
+  }
+  const scopes = scopeFilter ? [scopeFilter] : readable
   const files = []
   for (const scope of scopes) {
     for (const file of walk(base, join(base, scope))) {
@@ -252,7 +259,7 @@ function main() {
     if (command === 'matrix') return print(matrix(config))
 
     const role = requireRole(config, args)
-    if (command === 'recall') return print(cmdRecall(config, root, role))
+    if (command === 'recall') return print(cmdRecall(config, root, role, args.scope === true ? null : args.scope ?? null))
     if (command === 'search') return print(cmdSearch(config, root, role, args._.slice(1), args))
     if (command === 'read') {
       if (!args._[1]) throw new UsageError('請提供相對路徑')

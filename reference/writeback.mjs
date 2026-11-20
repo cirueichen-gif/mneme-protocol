@@ -114,6 +114,17 @@ function parseFrontMatter(text) {
   return { meta, body: text.slice(match[0].length) }
 }
 
+// 同一天可以 draft 很多次，每次一段，各自帶自己的來源
+const SEGMENT_MARKER = /<!--\s*mneme:segment\s*-->/
+
+function parseSegments(text) {
+  return text
+    .split(SEGMENT_MARKER)
+    .map(part => part.trim())
+    .filter(Boolean)
+    .map(part => parseFrontMatter(part))
+}
+
 function parseEntries(body) {
   const entries = []
   let current = null
@@ -146,9 +157,6 @@ function validateEntries(entries) {
     if (!entry.quote) throw new Error(`第 ${no} 條缺少 quote（回寫必須有逐字出處）`)
     if (!entry.privacy) throw new Error(`第 ${no} 條缺少 privacy（public / private / secret）`)
     if (!PRIVACY.has(entry.privacy)) throw new Error(`第 ${no} 條的 privacy 不合法：${entry.privacy}`)
-    if ([...entry.quote].length < MIN_QUOTE_CHARS) {
-      throw new Error(`第 ${no} 條的 quote 太短（至少 ${MIN_QUOTE_CHARS} 個字）：${entry.quote}`)
-    }
   })
 }
 
@@ -190,28 +198,39 @@ function cmdDraft(config, root, role, args) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   const target = join(dir, `${datePart()}.${role}.md`)
 
+  const header = [
+    '---',
+    'derived: true',
+    `role: ${role}`,
+    `created: ${stamp()}`,
+    `source: ${sourceLabel}`,
+    `sourceSha256: ${sha256(text)}`,
+    '---',
+    ''
+  ].join('\n')
+  const segmentText = `${header}${text.trim()}\n`
+
+  // 每一段（每次 draft）都帶自己的 front matter：同一天不同來源不會互相打架
   const first = !existsSync(target)
-  if (first) {
-    const header = [
-      '---',
-      'derived: true',
-      `role: ${role}`,
-      `created: ${stamp()}`,
-      `source: ${sourceLabel}`,
-      `sourceSha256: ${sha256(text)}`,
-      '---',
-      ''
-    ].join('\n')
-    writeFileSync(target, `${header}${text.trim()}\n`, 'utf8')
-  } else {
-    appendFileSync(target, `\n---\n\n${text.trim()}\n`, 'utf8')
+  if (first) writeFileSync(target, segmentText, 'utf8')
+  else appendFileSync(target, `\n<!-- mneme:segment -->\n${segmentText}`, 'utf8')
+
+  let sourceInArchive = false
+  if (sourceLabel !== 'stdin') {
+    try {
+      sourceInArchive = isInsideReal(root, realpathSync(sourceLabel))
+    } catch {
+      sourceInArchive = false
+    }
   }
 
   return {
     draft: `${draftsDir}/${datePart()}.${role}.md`,
     bytes: Buffer.byteLength(text),
     source: sourceLabel,
-    created: first
+    sourceInArchive,
+    created: first,
+    note: sourceInArchive ? '來源在記憶庫內；但庫內檔案也可能是別的 agent 寫的，不代表內容可信' : '來源在記憶庫外：屋主核准前請確認這份來源是他給的，還是你自己寫的'
   }
 }
 
@@ -268,62 +287,88 @@ function cmdCommit(config, root, role, args) {
   if (!existsSync(draftAbs)) throw new Error(`找不到草稿：${draftRel}`)
   const draftText = readFileSync(draftAbs, 'utf8')
   const draftSha = sha256(draftText)
-  const { meta, body } = parseFrontMatter(draftText)
 
-  // 3. 草稿的 role 必須與本次身分相同
-  if (meta.role && meta.role !== role) {
-    throw new Error(`草稿是 ${meta.role} 產生的，不能用 ${role} 的身分提交`)
-  }
-  if (meta.derived !== 'true') throw new Error('草稿缺少 derived: true 標記，拒絕寫入')
+  // 3. 逐段解析：同一天 draft 多次時，每一段各自帶來源與出處
+  const segments = parseSegments(draftText)
+  if (!segments.length) throw new Error('草稿是空的')
 
-  // 4. 條目結構完整
-  const entries = parseEntries(body)
-  validateEntries(entries)
-
-  // 5. quote 必須逐字出現在來源裡，而且來源必須還是 draft 當時那一份
-  let sourceText = null
-  let sourceShaNow = null
-  if (meta.source && meta.source !== 'stdin' && existsSync(meta.source)) {
-    try {
-      if (statSync(meta.source).size <= MAX_SOURCE_BYTES) {
-        sourceText = readFileSync(meta.source, 'utf8')
-        sourceShaNow = sha256(sourceText)
-      }
-    } catch {
-      sourceText = null
-    }
-  }
-
-  // draft 之後才改來源檔，等於繞過驗證：sha 對不上就重來
-  if (sourceText && meta.sourceSha256 && meta.sourceSha256 !== sourceShaNow) {
-    throw new Error('來源檔在 draft 之後被改過（sha256 不符），請重新產生草稿')
-  }
-
+  const allEntries = []
+  const sources = []
   const quoteOccurrences = []
-  if (!sourceText) {
-    if (!args['no-verify']) {
-      throw new Error('找不到草稿記錄的來源檔，無法核對 quote。確定要寫請加 --no-verify（會留下稽核紀錄）')
-    }
-  } else {
-    const haystack = norm(sourceText)
-    entries.forEach((entry, index) => {
-      const needle = norm(entry.quote)
-      if (!haystack.includes(needle)) {
-        throw new Error(`第 ${index + 1} 條的 quote 在來源裡找不到，整批拒收：「${entry.quote}」`)
-      }
-      quoteOccurrences.push(haystack.split(needle).length - 1)
-    })
-  }
 
-  // 來源是不是記憶庫自己的檔案：讓屋主一眼看出「這條的來源是 agent 自己寫的筆記」
-  let sourceInArchive = false
-  if (sourceText) {
-    try {
-      sourceInArchive = isInsideReal(root, realpathSync(meta.source))
-    } catch {
-      sourceInArchive = false
+  segments.forEach((segment, index) => {
+    const { meta, body } = segment
+    const label = segments.length > 1 ? `第 ${index + 1} 段：` : ''
+
+    if (meta.role && meta.role !== role) {
+      throw new Error(`${label}草稿是 ${meta.role} 產生的，不能用 ${role} 的身分提交`)
     }
-  }
+    if (meta.derived !== 'true') throw new Error(`${label}草稿缺少 derived: true 標記，拒絕寫入`)
+
+    const entries = parseEntries(body)
+    validateEntries(entries)
+    allEntries.push(...entries)
+
+    // 4. 來源與 sha
+    let sourceText = null
+    let sourceShaNow = null
+    if (meta.source && meta.source !== 'stdin' && existsSync(meta.source)) {
+      try {
+        if (statSync(meta.source).size <= MAX_SOURCE_BYTES) {
+          sourceText = readFileSync(meta.source, 'utf8')
+          sourceShaNow = sha256(sourceText)
+        }
+      } catch {
+        sourceText = null
+      }
+    }
+    if (sourceText && meta.sourceSha256 && meta.sourceSha256 !== sourceShaNow) {
+      throw new Error(`${label}來源檔在 draft 之後被改過（sha256 不符），請重新產生草稿`)
+    }
+
+    // 5. quote 逐字核對；短句必須在來源裡唯一，才算出處
+    if (!sourceText) {
+      if (!args['no-verify']) {
+        throw new Error(`${label}找不到草稿記錄的來源檔，無法核對 quote。確定要寫請加 --no-verify（會留下稽核紀錄）`)
+      }
+      entries.forEach((entry, no) => {
+        if ([...entry.quote].length < MIN_QUOTE_CHARS) {
+          throw new Error(`${label}第 ${no + 1} 條的 quote 太短（至少 ${MIN_QUOTE_CHARS} 個字）：${entry.quote}`)
+        }
+      })
+    } else {
+      const haystack = norm(sourceText)
+      entries.forEach((entry, no) => {
+        const needle = norm(entry.quote)
+        if (!haystack.includes(needle)) {
+          throw new Error(`${label}第 ${no + 1} 條的 quote 在來源裡找不到，整批拒收：「${entry.quote}」`)
+        }
+        const count = haystack.split(needle).length - 1
+        quoteOccurrences.push(count)
+        if ([...entry.quote].length < MIN_QUOTE_CHARS && count !== 1) {
+          throw new Error(
+            `${label}第 ${no + 1} 條的 quote 太短且不唯一（${[...entry.quote].length} 字、出現 ${count} 次）：「${entry.quote}」`
+          )
+        }
+      })
+    }
+
+    let sourceInArchive = false
+    if (sourceText) {
+      try {
+        sourceInArchive = isInsideReal(root, realpathSync(meta.source))
+      } catch {
+        sourceInArchive = false
+      }
+    }
+    sources.push({
+      source: meta.source ?? null,
+      sourceSha: sourceShaNow,
+      sourceInArchive,
+      verified: Boolean(sourceText),
+      entries: entries.length
+    })
+  })
 
   // 6. 落點分區
   const scope = resolveTargetScope(config, root, role, args)
@@ -337,13 +382,14 @@ function cmdCommit(config, root, role, args) {
     draftSha,
     target: targetRel,
     scope,
-    entries: entries.length,
-    verified: Boolean(sourceText),
-    source: meta.source ?? null,
-    sourceSha: sourceShaNow,
-    sourceInArchive,
+    segments: segments.length,
+    entries: allEntries.length,
+    verified: sources.every(s => s.verified),
+    source: sources[0]?.source ?? null,
+    sourceInArchive: sources.every(s => s.sourceInArchive),
+    sources,
     quoteOccurrences,
-    bytes: Buffer.byteLength(body)
+    bytes: Buffer.byteLength(allEntries.map(e => e.statement).join('\n'))
   }
 
   // 7. 預覽先於冪等：沒帶 --confirm 就只是預覽
@@ -364,7 +410,7 @@ function cmdCommit(config, root, role, args) {
   // 9. 先立帳、再寫入、後結案：任何一步失敗都留得下痕跡
   appendAudit(config, root, { at: stamp(), status: 'pending', ...summary })
 
-  const rendered = entries
+  const rendered = allEntries
     .map(entry => `- statement: ${entry.statement}\n  quote: ${entry.quote}\n  privacy: ${entry.privacy}`)
     .join('\n')
   try {

@@ -216,6 +216,7 @@ test('CLI recall：只列清單、不含無權限分區', () => {
 const SOURCE = [
   '今天是 2026-11-20，他提到他最喜歡無糖綠。',
   '他說他討厭香菜，還會挑出來。',
+  '他生日是三月五日，他喜歡熱鬧。',
   ''
 ].join('\n')
 
@@ -239,7 +240,7 @@ function prepare(library, temp, { notes = NOTES, source = SOURCE, role = 'alpha'
   const draft = json(drafted).draft
   // 草稿內容換成 notes（保留 draft 產生並驗證過的 front matter）
   const draftAbs = join(library, draft)
-  const head = readFileSync(draftAbs, 'utf8').split('\n').slice(0, 7).join('\n')
+  const head = readFileSync(draftAbs, 'utf8').split('\n').slice(0, 8).join('\n')
   writeFileSync(draftAbs, `${head}\n\n${notes}`, 'utf8')
   return { draft, sourcePath, notesPath }
 }
@@ -445,14 +446,89 @@ test('draft 之後改來源檔 → sha 不符，拒收', () => {
   })
 })
 
-test('太短的 quote 不算出處', () => {
+test('太短且不唯一的 quote 不算出處；短但唯一的可以', () => {
   withTempLibrary((library, temp) => {
-    const { draft } = prepare(library, temp, {
-      notes: ['- statement: x。', '  quote: 最', '  privacy: private', ''].join('\n')
+    // 「他」在來源裡出現很多次 → 拒
+    const repeated = prepare(library, temp, {
+      notes: ['- statement: x。', '  quote: 他', '  privacy: private', ''].join('\n')
     })
-    const result = run(WRITE, ['commit', '--root', library, '--as', 'alpha', '--ack-role', 'alpha', '--draft', draft, '--confirm'])
-    assert.equal(result.status, 1)
-    assert.match(result.stderr, /太短/)
+    const rejected = run(WRITE, ['commit', '--root', library, '--as', 'alpha', '--ack-role', 'alpha', '--draft', repeated.draft, '--confirm'])
+    assert.equal(rejected.status, 1)
+    assert.match(rejected.stderr, /太短且不唯一/)
+  })
+
+  withTempLibrary((library, temp) => {
+    // 「三月五日」只有 4 字但在來源裡唯一 → 應該通過（短句引用是常態）
+    const { draft } = prepare(library, temp, {
+      notes: ['- statement: 他生日在三月五日。', '  quote: 三月五日', '  privacy: private', ''].join('\n')
+    })
+    const ok = json(run(WRITE, ['commit', '--root', library, '--as', 'alpha', '--ack-role', 'alpha', '--draft', draft, '--confirm']))
+    assert.equal(ok.written, true)
+  })
+})
+
+test('同一天第二批 draft（不同來源）仍然寫得進去', () => {
+  withTempLibrary((library, temp) => {
+    const firstSource = join(temp, 'a.txt')
+    const secondSource = join(temp, 'b.txt')
+    writeFileSync(firstSource, '他提到他最喜歡無糖綠。', 'utf8')
+    writeFileSync(secondSource, '他生日是三月五日，他喜歡熱鬧。', 'utf8')
+
+    const first = json(run(WRITE, ['draft', '--root', library, '--as', 'alpha', '--from', firstSource]))
+    const second = json(run(WRITE, ['draft', '--root', library, '--as', 'alpha', '--from', secondSource]))
+    assert.equal(first.draft, second.draft, '同一天應該落在同一份草稿')
+    assert.equal(second.created, false)
+
+    // 把第一段換成合法條目（front matter 保留）
+    const draftAbs = join(library, second.draft)
+    const text = readFileSync(draftAbs, 'utf8')
+    const parts = text.split('<!-- mneme:segment -->')
+    const segmentOneHead = parts[0].split('\n').slice(0, 8).join('\n')
+    const segmentTwoHead = parts[1].split('\n').slice(0, 8).join('\n')
+    const rewritten =
+      `${segmentOneHead}\n- statement: 他喜歡無糖綠。\n  quote: 他最喜歡無糖綠\n  privacy: private\n` +
+      `\n<!-- mneme:segment -->\n${segmentTwoHead}\n- statement: 他生日在三月五日。\n  quote: 三月五日\n  privacy: private\n`
+    writeFileSync(draftAbs, rewritten, 'utf8')
+
+    const out = json(run(WRITE, ['commit', '--root', library, '--as', 'alpha', '--ack-role', 'alpha', '--draft', second.draft, '--confirm']))
+    assert.equal(out.written, true, JSON.stringify(out))
+    assert.equal(out.segments, 2)
+    assert.equal(out.entries, 2, '兩段的條目都要寫進去')
+  })
+})
+
+test('--no-verify 必須在稽核裡留下 verified:false', () => {
+  withTempLibrary(library => {
+    // 用 stdin 產生一份沒有來源檔的草稿
+    const stdinDraft = spawnSync(process.execPath, [WRITE, 'draft', '--root', library, '--as', 'alpha', '--from', '-'], {
+      encoding: 'utf8',
+      input: '- statement: 他喜歡無糖綠。\n  quote: 他最喜歡無糖綠\n  privacy: private\n'
+    })
+    assert.equal(stdinDraft.status, 0, stdinDraft.stderr)
+    const draft = JSON.parse(stdinDraft.stdout).draft
+    const committed = json(run(WRITE, ['commit', '--root', library, '--as', 'alpha', '--ack-role', 'alpha', '--draft', draft, '--confirm', '--no-verify']))
+    assert.equal(committed.written, true)
+    assert.equal(committed.verified, false)
+    const audit = readFileSync(join(library, '_audit', 'writeback.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    assert.equal(audit.at(-1).verified, false)
+  })
+})
+
+test('來源在庫外時，draft 與 commit 都要標 sourceInArchive:false', () => {
+  withTempLibrary((library, temp) => {
+    const sourcePath = join(temp, 'outside-note.txt')
+    writeFileSync(sourcePath, '他在火星有房子，還有兩隻狗。', 'utf8')
+    const drafted = json(run(WRITE, ['draft', '--root', library, '--as', 'alpha', '--from', sourcePath]))
+    assert.equal(drafted.sourceInArchive, false, 'draft 階段就要看得到')
+
+    const draftAbs = join(library, drafted.draft)
+    const head = readFileSync(draftAbs, 'utf8').split('\n').slice(0, 8).join('\n')
+    writeFileSync(draftAbs, `${head}\n- statement: 他在火星有房子。\n  quote: 他在火星有房子\n  privacy: private\n`, 'utf8')
+
+    const out = json(run(WRITE, ['commit', '--root', library, '--as', 'alpha', '--ack-role', 'alpha', '--draft', drafted.draft, '--confirm']))
+    assert.equal(out.written, true)
+    assert.equal(out.sourceInArchive, false)
+    assert.equal(out.sources[0].sourceInArchive, false)
   })
 })
 

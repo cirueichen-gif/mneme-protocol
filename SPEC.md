@@ -103,6 +103,8 @@ relPath → scope（第一段目錄）→ visibility（scopes[scope].visibility 
 
 - 直接開檔（不經過本協定的工具）
 - 硬連結（hardlink）：檔案在目錄樹內，`realpath` 看不出它與外部檔案同一個 inode
+- 手改草稿：`_drafts/` 在 agent 可寫的範圍內，`sourceSha256` 可以被一起改掉
+- 來源自選：程式只能確認「這句話出現在你指名的檔案裡」，不能確認那個檔案是屋主給的對話
 
 要真正的隔離，必須用不同的 OS 帳號執行呼叫端，且不給該帳號資料夾的讀取權限，只留查詢介面的連線。
 
@@ -157,7 +159,7 @@ relPath → scope（第一段目錄）→ visibility（scopes[scope].visibility 
 輸出：寫入 `<writeback.dir>/<YYYY-MM-DD>.<role>.md`，回傳該路徑。
 **不得**寫入任何正式分區。
 
-草稿格式（front matter 只在檔案第一次建立時寫一次，之後只 append 條目）：
+草稿格式（**每次 draft 都寫一段，每段帶自己的 front matter**，同一天不同來源不會互相打架）：
 
 ```markdown
 ---
@@ -171,6 +173,18 @@ sourceSha256: <來源內容的 sha256>
 - statement: 半年後仍成立的一句話
   quote: 原文逐字片段
   privacy: private
+```
+
+同一天第二次 draft 時追加：
+
+```markdown
+<!-- mneme:segment -->
+---
+derived: true
+role: alpha
+…
+---
+- statement: …
 ```
 
 `<writeback.dir>` 必須是單層目錄且在 `<root>` 內；設定成 `../x` 必須被拒絕。
@@ -189,10 +203,12 @@ sourceSha256: <來源內容的 sha256>
 2. **草稿來源**：草稿必須在 `<writeback.dir>` 內；front matter 的 `role` 必須等於本次 `--as`。
 3. **結構完整**：每一條都要有 `statement`、`quote`、`privacy`；`privacy` 僅限 `public` / `private` / `secret`。
 4. **quote 逐字核對**：拿 front matter 的 `source` 讀回來源檔，每一條的 `quote` 必須是來源的逐字子字串（比對前做 NFKC 正規化與空白收斂）。
-   - `quote` 至少 6 個字——單一字詞不算出處。
-   - 來源檔的 sha256 必須等於 front matter 的 `sourceSha256`；**draft 之後才改來源，整批拒收**。
+   - 辨識力由**唯一性**決定，不是字數：`quote` 少於 6 個字時，必須在來源中**只出現一次**才接受。
+   - 來源檔的 sha256 必須等於 front matter 的 `sourceSha256`；不符就整批拒收。
+     （此檢查假設草稿沒有被手改——草稿在 agent 可寫的目錄裡，`sha256` 防的是意外，不是惡意。）
    - 來源檔不存在或不可讀時，除非明確加 `--no-verify`，否則拒收。`--no-verify` 只允許屋主要求，會記入稽核並標 `verified: false`。
-   - 輸出與稽核必須記錄 `source`、`sourceSha`、`sourceInArchive`：屋主要能一眼看出「這條的來源是記憶庫裡既有的檔案，還是 agent 自己寫的筆記」。
+   - 輸出與稽核必須記錄每一段的 `source`、`sourceSha`、`sourceInArchive`。
+     **`sourceInArchive` 只代表檔案路徑在記憶庫裡，不代表內容可信**——記憶庫裡也可能有上一個 agent 剛寫進去的東西。屋主該看的是「這一段的來源，是我給他的對話，還是他自己寫的檔案」。
 5. **落點合法**：`L0` 與 `visibility: persona` 的分區**不接受回寫**（人格層只能由人改）。角色有多個可寫分區時必須用 `--scope` 指定。
 6. **冪等**：同一份草稿（同 sha256）已提交過就跳過，除非 `--force`。
 

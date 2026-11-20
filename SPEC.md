@@ -98,6 +98,12 @@ relPath → scope（第一段目錄）→ visibility（scopes[scope].visibility 
 
 實作方式不限，但行為必須一致。
 
+### 5.0 共同前提：身分必須被明確指定
+
+- **實作不得默默預設角色。** `owner` 不是預設值，是必須被指定的身分。
+- 呼叫端沒有帶角色時：CLI 至少要在 stderr 告警；HTTP 一律 401。
+- 不得「先以 owner 查詢、之後再想辦法縮小範圍」。
+
 ### 5.1 `info`
 
 輸出：`version`、`scopes`（名稱、visibility、layer、預算）、`roles`（名稱、可讀可見性、可寫分區）。

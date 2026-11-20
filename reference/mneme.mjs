@@ -37,9 +37,14 @@ function requireRoot(args) {
 }
 
 function requireRole(config, args) {
-  const role = typeof args.as === 'string' ? args.as : 'owner'
+  const explicit = typeof args.as === 'string'
+  const role = explicit ? args.as : 'owner'
   if (!config.roles?.[role]) {
     throw new Error(`未知角色：${role}（可用：${Object.keys(config.roles ?? {}).join('、')}）`)
+  }
+  // 未指定 --as 時不默默當屋主：協定要求身分必須被明確指定
+  if (!explicit) {
+    console.error('⚠ 未指定 --as <角色>，本次以 owner 執行。角色應該由屋主指定，不是預設值。')
   }
   return role
 }

@@ -1,0 +1,26 @@
+# 相依
+node_modules/
+
+# 記憶資料：這個 repo 永遠不該出現這些
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+.env
+.env.*
+*.pem
+*.key
+.roles.json
+api.json
+
+# 工具產生的暫存
+_drafts/
+_audit/
+test/tmp/
+screenshots/
+
+# 系統
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "範例記憶庫（合成資料，可公開）",
+  "scopes": {
+    "persona": { "visibility": "persona", "layer": "L0", "budgetKB": 8, "note": "人格卡：她是誰、怎麼說話" },
+    "memory": { "visibility": "private:alpha", "layer": "L1", "budgetKB": 50, "note": "長效記憶" },
+    "diary": { "visibility": "private:alpha", "layer": "L2", "note": "逐日紀錄" },
+    "letters": { "visibility": "pair", "layer": "L2", "note": "兩個角色之間的往來" },
+    "shared": { "visibility": "shared", "layer": "L1", "note": "共用工作與共用記憶" }
+  },
+  "roles": {
+    "owner": { "read": ["*"], "write": ["*"] },
+    "alpha": { "read": ["persona", "private:alpha", "shared", "pair"], "write": ["diary"] },
+    "beta": { "read": ["persona", "private:beta", "shared", "pair"], "write": ["diary"] }
+  },
+  "writeback": {
+    "dir": "_drafts",
+    "audit": "_audit/writeback.jsonl",
+    "requireConfirm": true
+  }
+}

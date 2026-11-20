@@ -1,0 +1,22 @@
+{
+  "name": "mneme-protocol",
+  "version": "1.0.0",
+  "description": "讓任何 AI Agent 能讀懂、能調用、能安全回寫個人長期記憶庫的公開協定",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/acl.test.mjs",
+    "demo": "node reference/mneme.mjs info --root test/fixtures"
+  },
+  "files": [
+    "AGENTS.md",
+    "SPEC.md",
+    "README.md",
+    "persona",
+    "reference",
+    "mneme.example.json"
+  ]
+}

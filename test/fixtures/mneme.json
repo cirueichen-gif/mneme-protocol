@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "測試用合成資料（不含任何真人內容）",
+  "scopes": {
+    "persona": { "visibility": "persona", "layer": "L0", "budgetKB": 8 },
+    "memory": { "visibility": "private:alpha", "layer": "L1", "budgetKB": 50 },
+    "diary": { "visibility": "private:alpha", "layer": "L2" },
+    "secret-beta": { "visibility": "private:beta", "layer": "L2" },
+    "letters": { "visibility": "pair", "layer": "L2" },
+    "shared": { "visibility": "shared", "layer": "L1" }
+  },
+  "roles": {
+    "owner": { "read": ["*"], "write": ["*"] },
+    "alpha": { "read": ["persona", "private:alpha", "shared", "pair"], "write": ["diary"] },
+    "beta": { "read": ["persona", "private:beta", "shared", "pair"], "write": ["diary"] }
+  },
+  "writeback": {
+    "dir": "_drafts",
+    "audit": "_audit/writeback.jsonl",
+    "requireConfirm": true
+  }
+}

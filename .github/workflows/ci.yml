@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 權限矩陣與介面契約
+        run: node --test test/acl.test.mjs
+
+      - name: 範例機器可讀（info / recall / search）
+        run: |
+          set -e
+          node reference/mneme.mjs info   --root test/fixtures
+          node reference/mneme.mjs recall --root test/fixtures --as alpha
+          node reference/mneme.mjs search --root test/fixtures --as owner "祕密"
+
+      - name: 公開 repo 不得含記憶資料
+        run: |
+          set -e
+          if git ls-files | grep -Ei '\.(db|sqlite3?)$'; then
+            echo "✗ repo 內出現資料庫檔"; exit 1
+          fi
+          if git ls-files | grep -Ei '(^|/)(\.roles\.json|api\.json|\.env)$'; then
+            echo "✗ repo 內出現憑證檔"; exit 1
+          fi
+          echo "✓ 沒有資料庫與憑證檔"
